@@ -1,12 +1,22 @@
-# random-cat-py
-How to create a random cat command for your Discord bot (discord.py@rewrite)
 
-## Stuff
-I really do not care what you do with this, just don't hold me liable if it doesn't work or any other dumb shit like that.
-If you want to see a random.dog command, contact me via Discord and I'll think about it, maybe.
+# random_cat_bot.py
+import discord
+from discord.ext import commands
+import aiohttp
+import asyncio
 
-Discord: `void#0001`
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-## Similar projects
-Random.cat website:  
-[Link to random.cat's website](https://random.cat)
+@bot.command(name="cat", help="Sends a random cat picture 🐱")
+async def cat(ctx):
+    async with aiohttp.ClientSession() as session:
+        async with session.get("https://aws.random.cat/meow") as response:
+            if response.status != 200:
+                await ctx.send("😿 Couldn't fetch a cat right now.")
+                return
+            data = await response.json()
+            await ctx.send(data["file"])
+
+# Replace this with your bot token
+bot.run("YOUR_DISCORD_BOT_TOKEN_HERE")
