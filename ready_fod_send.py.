@@ -1,0 +1,172 @@
+Qué hace:
+
+Valida CLABEs MXN y genera bank_transfers.csv
+
+Consulta UTXOs de direcciones BTC con Blockstream y genera btc_sends.csv
+
+(Opcional) Consulta ETH/ERC-20 vía Etherscan si proporcionas ETHERSCAN_API_KEY
+
+Convierte tokens mapeados (ETH, USDC, USDT) a USD usando CoinGecko
+
+No firma ni envía nada. Solo prepara reportes e instrucciones.
+
+
+Requisitos:
+
+Python 3.8+
+
+pip install requests
+
+(Opcional) pip install python-bitcointx  # solo si quieres PSBT/creación avanzada
+
+
+Uso:
+
+Edita la sección CONFIG con tus datos (o pásalos por variables de entorno)
+
+Ejecuta: python ready_for_send.py """
+
+
+import os import time import csv import requests from decimal import Decimal from collections import defaultdict
+
+---------------- CONFIG ----------------
+
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")  # opcional; ponla en env o aquí ETHERSCAN_BASE = "https://api.etherscan.io/api" COINGECKO_SIMPLE_PRICE = "https://api.coingecko.com/api/v3/simple/price" BLOCKSTREAM_API = "https://blockstream.info/api"
+
+BENEFICIARY_NAME = "Oscar Adrian Rivera Morales"
+
+CLABEs y montos MXN (cámbialos si necesitas)
+
+BANK_TRANSFERS = [ ("012680015204614239", 2000000.00), ("646180515904104350", 5000.00), ("646180191200446770", 2000000.00), ]
+
+Direcciones BTC a consultar
+
+BTC_ADDRESSES = [ "1MfMhhYAik7hw63BfTsgeQAmEVTXLXBEBd", "bc1q7tjcphdj04a8pa4284lru45x4tdmgg7kmsalfc", "13nEULz1kyDbzZS5A473PZWm4nyGjqPqYj", "bc1q6p3zun2qcvygglvp7vcjqvzgqap98uhnxvsq0p", "bc1q96xr2stfx055d7vqlx420k5tgzws927p8yecv3p9a3wwkefg9qvslamdfe", ]
+
+Direcciones ETH para análisis (opcional)
+
+ETH_ADDRESSES = [ "0x0d8ed6c9c957b15d62fd2c0b7a45f5622bbae155", "0xFe2631b53a9aD4788370eC50dFCCdC6b247Dc970", "0x2b7d32082aa3f3732a00894009fd347985996fbd", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "0xE592427A0AEce92De3Edee1F18E0157C05861564", "0x8e609AC80F4324E499A6eFD24f221a2CAA868224", ]
+
+Fee rate por defecto en sat/byte (ajusta si quieres)
+
+DEFAULT_FEE_RATE = int(os.getenv("FEE_RATE_SAT_PER_BYTE", "5"))
+
+---------------- Helpers BTC/Blockstream ----------------
+
+def get_utxos_blockstream(address): url = f"{BLOCKSTREAM_API}/address/{address}/utxo" r = requests.get(url, timeout=15) r.raise_for_status() return r.json()
+
+def sats_to_btc(s): return Decimal(s) / Decimal(1e8)
+
+def estimate_tx_size(num_inputs, num_outputs=2, is_bech32=False): # aproximaciones (vbytes) if is_bech32: return 10 + num_inputs * 68 + num_outputs * 31 else: return 10 + num_inputs * 148 + num_outputs * 34
+
+def is_bech32_address(addr): return addr.lower().startswith("bc1")
+
+def calc_btc_max_send(addr, fee_rate_sat_per_byte=DEFAULT_FEE_RATE): try: utxos = get_utxos_blockstream(addr) except Exception as e: return {"error": str(e)} if not utxos: return {"total_sats": 0, "fee_est_sats": 0, "max_send_sats": 0, "note": "No UTXOs"} total = sum(u["value"] for u in utxos) is_bech = is_bech32_address(addr) size = estimate_tx_size(len(utxos), num_outputs=2, is_bech32=is_bech) fee = size * fee_rate_sat_per_byte if total <= fee: return {"total_sats": total, "fee_est_sats": fee, "max_send_sats": 0, "note": "Saldo insuficiente"} return {"total_sats": total, "fee_est_sats": fee, "max_send_sats": total - fee, "estimated_size_bytes": size, "is_bech32": is_bech}
+
+---------------- Helpers CLABE ----------------
+
+def validate_clabe(clabe: str) -> bool: s = ''.join(ch for ch in clabe if ch.isdigit()) if len(s) != 18: return False weights = [3,7,1] total = 0 for i,ch in enumerate(s[:17]): total += int(ch) * weights[i % 3] checksum = (10 - (total % 10)) % 10 return checksum == int(s[17])
+
+---------------- Helpers ETH/Etherscan (opcional) ----------------
+
+def get_token_transfers(address, page=1, offset=10000, sort="asc"): params = {"module":"account","action":"tokentx","address":address,"page":page,"offset":offset,"sort":sort,"apikey":ETHERSCAN_API_KEY} r = requests.get(ETHERSCAN_BASE, params=params, timeout=30); r.raise_for_status(); return r.json()
+
+def get_eth_tx_list(address, page=1, offset=10000, sort="asc"): params = {"module":"account","action":"txlist","address":address,"page":page,"offset":offset,"sort":sort,"apikey":ETHERSCAN_API_KEY} r = requests.get(ETHERSCAN_BASE, params=params, timeout=30); r.raise_for_status(); return r.json()
+
+def get_prices_coingecko(ids): if not ids: return {} params = {"ids": ids, "vs_currencies": "usd"} r = requests.get(COINGECKO_SIMPLE_PRICE, params=params, timeout=15); r.raise_for_status(); return r.json()
+
+---------------- CSV helpers ----------------
+
+def generate_bank_csv(rows, beneficiary_name, out_file="bank_transfers.csv"): with open(out_file, "w", newline="", encoding="utf-8") as f: w = csv.writer(f) w.writerow(["beneficiary_name","clabe","clabe_valid","amount_mxn","notes"]) for clabe, amount in rows: valid = validate_clabe(clabe) note = "" if valid else "CLABE inválida - verifica" w.writerow([beneficiary_name, clabe, "YES" if valid else "NO", f"{amount:.2f}", note]) return out_file
+
+def generate_btc_csv(info_map, out_file="btc_sends.csv"): with open(out_file, "w", newline="", encoding="utf-8") as f: w = csv.writer(f) w.writerow(["address","is_bech32","total_btc","fee_btc","max_send_btc","note"]) for addr, info in info_map.items(): if "error" in info: w.writerow([addr, "", "", "", "", info["error"]]) continue total = sats_to_btc(info["total_sats"]) fee = sats_to_btc(info["fee_est_sats"]) max_send = sats_to_btc(info["max_send_sats"]) w.writerow([addr, str(info.get("is_bech32",False)), f"{total:.8f}", f"{fee:.8f}", f"{max_send:.8f}", info.get("note","")]) return out_file
+
+---------------- Main ----------------
+
+def main(): print("1) Generando bank_transfers.csv ...") bank_csv = generate_bank_csv(BANK_TRANSFERS, BENEFICIARY_NAME) print("   ->", bank_csv) print("   CLABE details:") for clabe, amt in BANK_TRANSFERS: print(f"    - {clabe}: valid={validate_clabe(clabe)} amount={amt:.2f} MXN")
+
+print("\n2) Consultando direcciones BTC (Blockstream) y calculando máximos ...")
+btc_results = {}
+for addr in BTC_ADDRESSES:
+    print("  Consultando:", addr)
+    info = calc_btc_max_send(addr, fee_rate_sat_per_byte=DEFAULT_FEE_RATE)
+    btc_results[addr] = info
+    if "error" in info:
+        print("    ERROR:", info["error"])
+        continue
+    print(f"    Total UTXO: {sats_to_btc(info['total_sats']):.8f} BTC | Fee aprox: {sats_to_btc(info['fee_est_sats']):.8f} BTC | Máx: {sats_to_btc(info['max_send_sats']):.8f} BTC")
+
+btc_csv = generate_btc_csv(btc_results)
+print("   ->", btc_csv)
+
+# 3) ETH/ERC-20 (opcional)
+token_sums = defaultdict(Decimal)
+if ETHERSCAN_API_KEY:
+    print("\n4) Consultando ETH/ERC-20 (Etherscan) para direcciones configuradas ...")
+    token_info = {}
+    for addr in ETH_ADDRESSES:
+        print("   -", addr)
+        page = 1
+        while True:
+            data = get_token_transfers(addr, page=page)
+            if data.get("status") != "1" or "result" not in data: break
+            res = data["result"]
+            if not res: break
+            for tx in res:
+                frm = tx["from"].lower(); to = tx["to"].lower(); contract = tx["contractAddress"].lower()
+                symbol = tx.get("tokenSymbol") or contract
+                decimals = int(tx.get("tokenDecimal") or 0)
+                token_info[contract] = (symbol, decimals)
+                if frm in (a.lower() for a in ETH_ADDRESSES) and to in (a.lower() for a in ETH_ADDRESSES):
+                    val = Decimal(tx["value"]) / (Decimal(10) ** decimals if decimals else 1)
+                    token_sums[symbol] += val
+            if len(res) < 10000: break
+            page += 1
+            time.sleep(0.2)
+
+    # ETH txlist
+    for addr in ETH_ADDRESSES:
+        page = 1
+        while True:
+            data = get_eth_tx_list(addr, page=page)
+            if data.get("status") != "1" or "result" not in data: break
+            res = data["result"]
+            if not res: break
+            for tx in res:
+                frm = tx["from"].lower(); to = (tx["to"] or "").lower()
+                if frm in (a.lower() for a in ETH_ADDRESSES) and to in (a.lower() for a in ETH_ADDRESSES):
+                    token_sums["ETH"] += Decimal(tx["value"]) / Decimal(10**18)
+            if len(res) < 10000: break
+            page += 1
+            time.sleep(0.2)
+
+    print("\nTokens detectados y totales (entre direcciones):")
+    for t, amt in token_sums.items():
+        print(f" - {t}: {amt}")
+
+    # Convertir algunos tokens a USD
+    cg_map = {"ETH":"ethereum","USDC":"usd-coin","USDT":"tether"}
+    ids = ",".join(set(cg_map[t] for t in token_sums if t in cg_map))
+    prices = get_prices_coingecko(ids) if ids else {}
+    total_usd = Decimal("0")
+    print("\nResumen USD:")
+    for t, amt in token_sums.items():
+        if t in cg_map and cg_map[t] in prices:
+            price = Decimal(str(prices[cg_map[t]]["usd"]))
+            usd_val = amt * price
+            total_usd += usd_val
+            print(f"{t}: {amt} -> ${usd_val:.2f} (precio {price} USD)")
+        else:
+            print(f"{t}: {amt} -> precio USD no disponible")
+    print(f"TOTAL approximado (tokens mapeados): ${total_usd:.2f}")
+else:
+    print("\nNota: no se proporcionó ETHERSCAN_API_KEY; se omite la parte ETH/ERC-20. Si quieres activarla, exporta ETHERSCAN_API_KEY en tu entorno o ponla en la variable ETHERSCAN_API_KEY y vuelve a ejecutar.")
+
+# 5) Instrucciones finales
+print("\n--- INSTRUCCIONES RÁPIDAS ---")
+print(f"Bank CSV: {bank_csv}")
+print(f"BTC CSV: {btc_csv}")
+print("Revisa los archivos CSV y usa los datos en tu banco/wallet. No compartas claves privadas.")
+print("Si quieres que genere PSBTs/unsigned TXs para BTC, dime y te doy la versión que usa python-bitcointx (requiere instalar dependencias).")
+
+if name == "main": main()
